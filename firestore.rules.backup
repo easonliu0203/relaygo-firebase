@@ -1,0 +1,156 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 用戶資料規則
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 司機資料規則
+    match /drivers/{driverId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == driverId;
+    }
+
+    // 訂單規則（bookings 集合）
+    // 此集合由 Supabase Edge Function 自動同步，客戶端只能讀取
+    match /bookings/{bookingId} {
+      // 允許用戶讀取自己的訂單
+      // 注意：使用 exists() 來允許讀取不存在的文檔（返回 null）
+      // 這樣可以避免在 Edge Function 同步延遲時出現權限錯誤
+      allow read: if request.auth != null &&
+        (
+          // 文檔不存在時允許讀取（會返回 null）
+          !exists(/databases/$(database)/documents/bookings/$(bookingId))
+          ||
+          // 文檔存在時檢查是否為用戶自己的訂單
+          (request.auth.uid == resource.data.customerId ||
+           request.auth.uid == resource.data.driverId)
+        );
+
+      // 禁止客戶端寫入（由 Supabase Edge Function 寫入）
+      // 所有寫入操作必須通過 Supabase API
+      allow write: if false;
+    }
+
+    // 訂單即時鏡像規則（orders_rt 集合）
+    // 此集合由 Supabase Edge Function 自動同步，客戶端只能讀取
+    match /orders_rt/{orderId} {
+      // 允許用戶讀取自己的訂單（客戶或司機）
+      // 注意：使用 exists() 來允許讀取不存在的文檔（返回 null）
+      // 這樣可以避免在 Edge Function 同步延遲時出現權限錯誤
+      allow read: if request.auth != null
+                  && (
+                    // 文檔不存在時允許讀取（會返回 null）
+                    !exists(/databases/$(database)/documents/orders_rt/$(orderId))
+                    ||
+                    // 文檔存在時檢查是否為用戶自己的訂單
+                    (resource.data.customerId == request.auth.uid ||
+                     resource.data.driverId == request.auth.uid)
+                  );
+
+      // 禁止客戶端寫入（由 Supabase Edge Function 寫入）
+      // 所有寫入操作必須通過 Supabase API
+      allow write: if false;
+    }
+    
+    // 車輛資料規則
+    match /vehicles/{vehicleId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && 
+        request.auth.uid == resource.data.driverId;
+    }
+    
+    // 即時位置規則 (僅限司機更新自己的位置)
+    match /driver_locations/{driverId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == driverId;
+    }
+    
+    // 聊天室規則（chat_rooms 集合）
+    // 聊天室由 Backend API 創建，客戶端可以讀取和更新（lastMessage, unreadCount）
+    match /chat_rooms/{roomId} {
+      // 允許用戶讀取自己參與的聊天室
+      allow read: if request.auth != null &&
+        (
+          // 文檔不存在時允許讀取（會返回 null）
+          !exists(/databases/$(database)/documents/chat_rooms/$(roomId))
+          ||
+          // 文檔存在時檢查是否為用戶自己的聊天室
+          (resource.data.customerId == request.auth.uid ||
+           resource.data.driverId == request.auth.uid)
+        );
+
+      // 允許客戶端更新聊天室（lastMessage, lastMessageTime, unreadCount）
+      // 但不允許創建或刪除聊天室
+      allow update: if request.auth != null &&
+        (resource.data.customerId == request.auth.uid ||
+         resource.data.driverId == request.auth.uid) &&
+        // 只允許更新這些欄位
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['lastMessage', 'lastMessageTime', 'customerUnreadCount', 'driverUnreadCount', 'updatedAt']);
+
+      // 禁止客戶端創建或刪除聊天室（由 Backend API 創建）
+      allow create, delete: if false;
+
+      // 聊天訊息規則（chat_rooms/{roomId}/messages 子集合）
+      match /messages/{messageId} {
+        // 允許用戶讀取自己參與的聊天室的訊息
+        allow read: if request.auth != null &&
+          (
+            // 文檔不存在時允許讀取（會返回 null）
+            !exists(/databases/$(database)/documents/chat_rooms/$(roomId))
+            ||
+            // 文檔存在時檢查是否為用戶自己的聊天室
+            (get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.customerId == request.auth.uid ||
+             get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.driverId == request.auth.uid)
+          );
+
+        // 允許用戶創建訊息（發送訊息）
+        allow create: if request.auth != null &&
+          // 檢查是否為聊天室的參與者
+          (get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.customerId == request.auth.uid ||
+           get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.driverId == request.auth.uid) &&
+          // 檢查 senderId 是否為當前用戶
+          request.resource.data.senderId == request.auth.uid;
+
+        // 允許 Cloud Functions 更新翻譯欄位
+        // 客戶端不能直接更新訊息，但 Cloud Functions 可以寫入 translations 和 translatedAt
+        // 注意：Cloud Functions 使用 Admin SDK，不受這些規則限制
+        // 這裡的規則主要是文檔化意圖，實際上 Cloud Functions 總是可以寫入
+        allow update: if false; // 客戶端禁止更新
+
+        // 禁止客戶端刪除訊息
+        allow delete: if false;
+      }
+    }
+
+    // 舊的聊天訊息規則（保留以防萬一）
+    match /chats/{chatId}/messages/{messageId} {
+      allow read, write: if request.auth != null &&
+        request.auth.uid in resource.data.participants;
+    }
+    
+    // 評價規則
+    match /reviews/{reviewId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && 
+        request.auth.uid == request.resource.data.reviewerId;
+      allow update: if false; // 評價不可修改
+    }
+    
+    // 公司管理規則 (僅限管理員)
+    match /companies/{companyId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && 
+        request.auth.token.admin == true;
+    }
+    
+    // 系統設定規則 (僅限管理員)
+    match /system_settings/{settingId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && 
+        request.auth.token.admin == true;
+    }
+  }
+}
