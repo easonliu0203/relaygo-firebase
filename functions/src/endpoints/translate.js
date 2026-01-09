@@ -44,21 +44,24 @@ exports.translate = onRequest(
     }
 
     try {
-      // 1. 驗證 Firebase Auth Token
+      // 1. 驗證 Firebase Auth Token（可選，支援遊客模式）
       const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-        return;
-      }
+      let decodedToken = null;
+      let userId = 'guest'; // 預設為遊客
 
-      const idToken = authHeader.split('Bearer ')[1];
-      let decodedToken;
-      try {
-        decodedToken = await getAuth().verifyIdToken(idToken);
-      } catch (error) {
-        console.error('Token verification failed:', error);
-        res.status(401).json({ error: 'Unauthorized: Invalid token' });
-        return;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const idToken = authHeader.split('Bearer ')[1];
+        try {
+          decodedToken = await getAuth().verifyIdToken(idToken);
+          userId = decodedToken.uid;
+          console.log(`Authenticated user: ${userId}`);
+        } catch (error) {
+          console.error('Token verification failed:', error);
+          // 不拋出錯誤，允許作為遊客繼續
+          console.log('Falling back to guest mode');
+        }
+      } else {
+        console.log('Guest mode: No authentication token provided');
       }
 
       // 2. 驗證請求參數
@@ -93,7 +96,7 @@ exports.translate = onRequest(
         res.status(200).json({
           translatedText: cachedTranslation,
           cached: true,
-          userId: decodedToken.uid,
+          userId: userId,
         });
         return;
       }
@@ -111,7 +114,7 @@ exports.translate = onRequest(
       res.status(200).json({
         translatedText,
         cached: false,
-        userId: decodedToken.uid,
+        userId: userId,
       });
 
     } catch (error) {

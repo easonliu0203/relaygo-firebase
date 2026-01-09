@@ -24,6 +24,14 @@ const db = admin.firestore();
 const { translate } = require('./src/endpoints/translate');
 exports.translate = translate;
 
+// 導出 STT 端點
+const { stt } = require('./src/endpoints/stt');
+exports.stt = stt;
+
+// 導出 TTS 端點
+const { tts } = require('./src/endpoints/tts');
+exports.tts = tts;
+
 // 導出推播通知觸發器
 const { onNewChatMessage } = require('./src/endpoints/pushNotification');
 exports.onNewChatMessage = onNewChatMessage;

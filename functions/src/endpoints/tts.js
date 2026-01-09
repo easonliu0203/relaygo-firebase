@@ -42,21 +42,24 @@ exports.tts = onRequest(
     }
 
     try {
-      // 1. 驗證 Firebase Auth Token
+      // 1. 驗證 Firebase Auth Token（可選，支援遊客模式）
       const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-        return;
-      }
+      let decodedToken = null;
+      let userId = 'guest'; // 預設為遊客
 
-      const idToken = authHeader.split('Bearer ')[1];
-      let decodedToken;
-      try {
-        decodedToken = await getAuth().verifyIdToken(idToken);
-      } catch (error) {
-        console.error('Token verification failed:', error);
-        res.status(401).json({ error: 'Unauthorized: Invalid token' });
-        return;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const idToken = authHeader.split('Bearer ')[1];
+        try {
+          decodedToken = await getAuth().verifyIdToken(idToken);
+          userId = decodedToken.uid;
+          console.log(`[TTS] Authenticated user: ${userId}`);
+        } catch (error) {
+          console.error('[TTS] Token verification failed:', error);
+          // 不拋出錯誤，允許作為遊客繼續
+          console.log('[TTS] Falling back to guest mode');
+        }
+      } else {
+        console.log('[TTS] Guest mode: No authentication token provided');
       }
 
       // 2. 驗證請求參數
@@ -92,7 +95,7 @@ exports.tts = onRequest(
         return;
       }
 
-      console.log(`[TTS] Request from user ${decodedToken.uid}: language=${language}, textLength=${text.length}`);
+      console.log(`[TTS] Request from user ${userId}: language=${language}, textLength=${text.length}`);
 
       // 3. 調用 OpenAI TTS API
       const ttsService = new TtsService(openaiApiKey.value());
@@ -104,7 +107,7 @@ exports.tts = onRequest(
       res.set('Content-Disposition', 'attachment; filename="speech.mp3"');
       res.status(200).send(audioBuffer);
 
-      console.log(`[TTS] Successfully generated speech for user ${decodedToken.uid}, size=${audioBuffer.length} bytes`);
+      console.log(`[TTS] Successfully generated speech for user ${userId}, size=${audioBuffer.length} bytes`);
 
     } catch (error) {
       console.error('TTS error:', error);

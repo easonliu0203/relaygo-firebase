@@ -52,21 +52,24 @@ exports.stt = onRequest(
     }
 
     try {
-      // 1. 驗證 Firebase Auth Token
+      // 1. 驗證 Firebase Auth Token（可選，支援遊客模式）
       const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
-        return;
-      }
+      let decodedToken = null;
+      let userId = 'guest'; // 預設為遊客
 
-      const idToken = authHeader.split('Bearer ')[1];
-      let decodedToken;
-      try {
-        decodedToken = await getAuth().verifyIdToken(idToken);
-      } catch (error) {
-        console.error('Token verification failed:', error);
-        res.status(401).json({ error: 'Unauthorized: Invalid token' });
-        return;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const idToken = authHeader.split('Bearer ')[1];
+        try {
+          decodedToken = await getAuth().verifyIdToken(idToken);
+          userId = decodedToken.uid;
+          console.log(`[STT] Authenticated user: ${userId}`);
+        } catch (error) {
+          console.error('[STT] Token verification failed:', error);
+          // 不拋出錯誤，允許作為遊客繼續
+          console.log('[STT] Falling back to guest mode');
+        }
+      } else {
+        console.log('[STT] Guest mode: No authentication token provided');
       }
 
       // 2. 解析 multipart/form-data
@@ -107,7 +110,7 @@ exports.stt = onRequest(
         return;
       }
 
-      console.log(`[STT] Request from user ${decodedToken.uid}: language=${language}, audioSize=${audioBuffer.length} bytes, filename=${filename}`);
+      console.log(`[STT] Request from user ${userId}: language=${language}, audioSize=${audioBuffer.length} bytes, filename=${filename}`);
 
       // 4. 調用 OpenAI Whisper API
       const sttService = new SttService(openaiApiKey.value());
@@ -118,10 +121,10 @@ exports.stt = onRequest(
         text: result.text,
         language: result.language,
         duration: result.duration,
-        userId: decodedToken.uid,
+        userId: userId,
       });
 
-      console.log(`[STT] Successfully transcribed audio for user ${decodedToken.uid}, text="${result.text.substring(0, 100)}..."`);
+      console.log(`[STT] Successfully transcribed audio for user ${userId}, text="${result.text.substring(0, 100)}..."`);
 
     } catch (error) {
       console.error('STT error:', error);
