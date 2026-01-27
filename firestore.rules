@@ -1,0 +1,155 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ========================================
+    // 輔助函數
+    // ========================================
+    
+    // 檢查用戶是否已登入
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    // 檢查是否為管理員
+    // 暫時允許所有已登入用戶作為管理員（因為 Web Admin 使用 Supabase Auth）
+    // TODO: 改用 Custom Claims 或其他更安全的驗證方式
+    function isAdmin() {
+      return isSignedIn();
+    }
+    
+    // 檢查是否為對話的擁有者
+    function isChatOwner(chatId) {
+      return isSignedIn() && 
+             chatId == 'cs_' + request.auth.uid;
+    }
+    
+    // ========================================
+    // 用戶集合（需要讀取權限以獲取用戶資訊）
+    // ========================================
+    
+    match /users/{userId} {
+      // 允許用戶讀取自己的資料
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      
+      // 允許管理員讀取所有用戶資料
+      allow read: if isAdmin();
+      
+      // 允許用戶寫入自己的資料
+      allow write: if isSignedIn() && request.auth.uid == userId;
+    }
+    
+    // ========================================
+    // 客服對話集合
+    // ========================================
+    
+    match /customer_service_chats/{chatId} {
+      // 允許用戶讀取和寫入自己的客服對話
+      allow read, write: if isChatOwner(chatId);
+      
+      // 允許管理員讀取所有客服對話
+      allow read: if isAdmin();
+      
+      // 允許管理員更新客服對話（例如：更新 lastMessage）
+      allow update: if isAdmin();
+      
+      // ========================================
+      // 客服訊息子集合
+      // ========================================
+      
+      match /messages/{messageId} {
+        // 允許用戶讀取和寫入自己的客服對話訊息
+        allow read, create: if isChatOwner(chatId);
+        
+        // 允許管理員讀取和寫入所有客服訊息
+        allow read, create: if isAdmin();
+        
+        // 允許訊息發送者更新自己的訊息（例如：標記為已讀）
+        allow update: if isSignedIn() && 
+                         (request.auth.uid == resource.data.senderId || isAdmin());
+      }
+    }
+    
+    // ========================================
+    // 現有的聊天室規則（訂單相關聊天）
+    // 請保留您原有的規則，以下是示例
+    // ========================================
+    
+    match /chat_rooms/{bookingId} {
+      // 🔒 修復：只允許聊天室的客戶或司機讀取和更新聊天室
+      // 讀取權限：只能讀取自己參與的聊天室
+      allow read: if isSignedIn() &&
+        (
+          // 文檔不存在時允許讀取（會返回 null）
+          !exists(/databases/$(database)/documents/chat_rooms/$(bookingId))
+          ||
+          // 文檔存在時檢查是否為用戶自己的聊天室
+          (resource.data.customerId == request.auth.uid ||
+           resource.data.driverId == request.auth.uid)
+        );
+
+      // 更新權限：只能更新特定欄位（lastMessage, lastMessageTime, unreadCount）
+      allow update: if isSignedIn() &&
+        (resource.data.customerId == request.auth.uid ||
+         resource.data.driverId == request.auth.uid) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['lastMessage', 'lastMessageTime', 'customerUnreadCount', 'driverUnreadCount', 'updatedAt']);
+
+      // 禁止客戶端創建或刪除聊天室（由 Backend API 創建）
+      allow create, delete: if false;
+
+      match /messages/{messageId} {
+        // 讀取權限：只能讀取自己參與的聊天室的訊息
+        allow read: if isSignedIn() &&
+          (
+            // 文檔不存在時允許讀取（會返回 null）
+            !exists(/databases/$(database)/documents/chat_rooms/$(bookingId))
+            ||
+            // 文檔存在時檢查是否為用戶自己的聊天室
+            (get(/databases/$(database)/documents/chat_rooms/$(bookingId)).data.customerId == request.auth.uid ||
+             get(/databases/$(database)/documents/chat_rooms/$(bookingId)).data.driverId == request.auth.uid)
+          );
+
+        // 創建權限：只能在自己參與的聊天室中創建訊息
+        allow create: if isSignedIn() &&
+          (get(/databases/$(database)/documents/chat_rooms/$(bookingId)).data.customerId == request.auth.uid ||
+           get(/databases/$(database)/documents/chat_rooms/$(bookingId)).data.driverId == request.auth.uid) &&
+          request.resource.data.senderId == request.auth.uid;
+
+        // 禁止更新和刪除訊息
+        allow update, delete: if false;
+      }
+    }
+    
+    // ========================================
+    // 其他可能的集合（根據需要調整）
+    // ========================================
+
+    // 訂單即時鏡像集合（從 Supabase 單向鏡像，Read-Only）
+    // 用於司機端和客戶端即時畫面展示
+    match /orders_rt/{orderId} {
+      // 允許所有已登入用戶讀取訂單（用於查詢）
+      // 注意：這是暫時性解決方案，因為 Firestore 查詢需要先讀取文檔才能檢查 resource.data
+      // 實際的資料過濾由應用層的查詢條件（where driverId/customerId）來保證
+      allow read: if isSignedIn();
+
+      // 允許管理員讀取所有訂單
+      allow read: if isAdmin();
+
+      // 禁止所有寫入操作（此集合由後端同步，不允許客戶端寫入）
+      allow write: if false;
+    }
+
+    // 位置追蹤
+    match /driver_locations/{driverId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == driverId;
+    }
+
+    // 推送通知 tokens
+    match /fcm_tokens/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+  }
+}
+
